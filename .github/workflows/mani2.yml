@@ -1,6 +1,6 @@
 name: Build Unsigned Wine-Container IPA (Madeira)
 
-on:
+off:
   workflow_dispatch:
   push:
     branches: [ main, master ]
