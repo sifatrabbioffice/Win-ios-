@@ -7,8 +7,8 @@ on:
 
 jobs:
   build-wine-ipa:
-    name: Build Unsigned Wine IPA (Full Container)
-    runs-on: macos-latest
+    name: Build Unsigned Wine IPA (Official Flow)
+    runs-on: macos-14
 
     steps:
       # ────────────────────────────────────────────────
@@ -25,13 +25,13 @@ jobs:
       # ────────────────────────────────────────────────
       # ২. Xcode সেটআপ
       # ────────────────────────────────────────────────
-      - name: Set up Xcode Latest
+      - name: Set up Xcode 15.4
         uses: maxim-lobanov/setup-xcode@v1
         with:
-          xcode-version: latest
+          xcode-version: '15.4'
 
       # ────────────────────────────────────────────────
-      # ৩. ক্যাশিং সেটআপ
+      # ৩. ক্যাশিং সেটআপ (ccache + Homebrew + Cargo)
       # ────────────────────────────────────────────────
       - name: Setup ccache Cache
         uses: actions/cache@v4
@@ -41,7 +41,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-ccache-
 
-      - name: Cache Dependencies & Toolchains
+      - name: Cache Build Dependencies
         uses: actions/cache@v4
         with:
           path: |
@@ -54,7 +54,7 @@ jobs:
             ${{ runner.os }}-madeira-deps-
 
       # ────────────────────────────────────────────────
-      # ৪. বিল্ড টুল ইনস্টল
+      # ৪. বিল্ড ডিপেনডেন্সি ও টুলস ইনস্টল
       # ────────────────────────────────────────────────
       - name: Install Build Tools
         env:
@@ -68,7 +68,7 @@ jobs:
           sudo gem install cocoapods || true
 
       # ────────────────────────────────────────────────
-      # ৫. পাইথন ডিপেন্ডেন্সি
+      # ৫. পাইথন ডিপেনডেন্সি
       # ────────────────────────────────────────────────
       - name: Install Python Dependencies
         run: |
@@ -76,86 +76,78 @@ jobs:
           pip3 install pyyaml jinja2 meson --quiet --break-system-packages
 
       # ────────────────────────────────────────────────
-      # ৬. MINGW Toolchain ইনস্টল (Dock Compiling)
+      # ৬. LLVM-MinGW Toolchain সঠিক পাথে সেটআপ
       # ────────────────────────────────────────────────
-      - name: Setup LLVM-MinGW Toolchain
+      - name: Setup LLVM-MinGW Cross-Compiler
         working-directory: Madeira
         run: |
-          echo "🛠️ Downloading and Configuring llvm-mingw..."
+          echo "🛠️ Configuring LLVM-MinGW Toolchain..."
           mkdir -p toolchains
           
-          if [ ! -d "toolchains/llvm-mingw-ucrt-macos-universal" ]; then
-            wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-macos-universal.tar.xz -O llvm-mingw.tar.xz || \
-            wget -q https://github.com/mstorsjo/llvm-mingw/releases/latest/download/llvm-mingw-ucrt-macos-universal.tar.xz -O llvm-mingw.tar.xz
-            
+          # Madeira স্ক্রিপ্ট অনুযায়ী নির্দিষ্ট টুলচেইন ফোল্ডার মেলানো
+          TARGET_DIR="toolchains/llvm-mingw-20240619-ucrt-macos-universal"
+          if [ ! -d "$TARGET_DIR" ]; then
+            wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-macos-universal.tar.xz -O llvm-mingw.tar.xz
             tar -xf llvm-mingw.tar.xz -C toolchains/
             rm -f llvm-mingw.tar.xz
-            mv toolchains/llvm-mingw-* toolchains/llvm-mingw-ucrt-macos-universal 2>/dev/null || true
           fi
           
-          MINGW_BIN="$(pwd)/toolchains/llvm-mingw-ucrt-macos-universal/bin"
+          MINGW_BIN="$(pwd)/$TARGET_DIR/bin"
           echo "$MINGW_BIN" >> $GITHUB_PATH
-          echo "LLVM_MINGW=$(pwd)/toolchains/llvm-mingw-ucrt-macos-universal" >> $GITHUB_ENV
+          echo "LLVM_MINGW=$(pwd)/$TARGET_DIR" >> $GITHUB_ENV
 
       # ────────────────────────────────────────────────
-      # ৭. CocoaPods সেটআপ
+      # ৭. CocoaPods ডিপেনডেন্সি ইনস্টল
       # ────────────────────────────────────────────────
-      - name: Install CocoaPods Dependencies
+      - name: Install CocoaPods
         working-directory: Madeira
         run: |
-          PODFILE_PATH=$(find . -name "Podfile" | head -n 1)
-          if [ -n "$PODFILE_PATH" ]; then
-            POD_DIR=$(dirname "$PODFILE_PATH")
-            cd "$POD_DIR" && pod install --repo-update
+          if [ -f "Podfile" ]; then
+            pod install --repo-update
+          elif [ -f "app/Podfile" ]; then
+            cd app && pod install --repo-update
           fi
 
       # ────────────────────────────────────────────────
-      # ৮. নেটিভ কম্পোনেন্ট বিল্ড
+      # ৮. নেটিভ বাইনারি স্ক্রিপ্ট এক্সিকিউশন (Explicit Order)
       # ────────────────────────────────────────────────
-      - name: Build Native Binaries (Wine, Dock, FEX)
+      - name: Build Native Container Components
         working-directory: Madeira
         env:
           CCACHE_DIR: ~/.ccache
           CCACHE_COMPRESS: "1"
           MAKEFLAGS: "-j$(sysctl -n hw.ncpu)"
         run: |
-          echo "🚀 Compiling Native Components..."
+          echo "🚀 Compiling Madeira Native Components..."
           ccache -s || true
           
-          for script in build/ffmpeg/build.sh \
-                        build/wine/build.sh \
-                        build/fex/build.sh \
-                        build/dxmt/build.sh \
-                        build/madeira-dock/build.sh; do
+          # স্ক্রিপ্ট এক্সিকিউট করার অনুমতি প্রদান
+          find build -name "*.sh" -exec chmod +x {} \; 2>/dev/null || true
+          
+          # নির্দিষ্ট ক্রমানুসারে মূল বিল্ড স্ক্রিপ্টগুলো রান
+          SCRIPTS=(
+            "build/ffmpeg/build.sh"
+            "build/wine/build.sh"
+            "build/fex/build.sh"
+            "build/dxmt/build.sh"
+            "build/madeira-dock/build.sh"
+          )
+
+          for script in "${SCRIPTS[@]}"; do
             if [ -f "$script" ]; then
-              echo "▶️ Compiling: $script"
-              chmod +x "$script"
-              bash "$script" || echo "⚠️ Warning: $script finished with errors"
+              echo "▶️ Running Script: $script"
+              bash "$script" || echo "⚠️ Warning: $script returned exit code $?"
+            else
+              echo "⏭️ Skipping: $script (file not found)"
             fi
           done
           
           ccache -z || true
 
       # ────────────────────────────────────────────────
-      # ৯. নেটিভ বাইনারি অ্যাসেটস চেক ও সঠিক লোকেশনে সিঙ্ক
+      # ৯. আনসাইনড Xcode XCConfig
       # ────────────────────────────────────────────────
-      - name: Sync Native Binaries into App Resources
-        working-directory: Madeira
-        run: |
-          echo "📁 Syncing compiled binaries into iOS Resource bundles..."
-          
-          # প্রয়োজনীয় অ্যাপ রিসোর্স ফোল্ডার তৈরি
-          mkdir -p app/Madeira/Resources
-          
-          # প্রস্তুতকৃত টুলচেইন বাইনারি অ্যাপ অ্যাসেটসে পাঠানো
-          if [ -d "toolchains" ]; then
-            cp -rf toolchains/* app/Madeira/Resources/ 2>/dev/null || true
-          fi
-
-      # ────────────────────────────────────────────────
-      # ১০. আনসাইনড কনফিগারেশন সেটআপ
-      # ────────────────────────────────────────────────
-      - name: Configure Unsigned Build Settings
+      - name: Create XCConfig
         working-directory: Madeira
         run: |
           mkdir -p build_output
@@ -175,31 +167,35 @@ jobs:
           EOF
 
       # ────────────────────────────────────────────────
-      # ১১. Xcode বিল্ড ও কস্পাইলেশন
+      # ১০. Xcode App Compilation & Target Determination
       # ────────────────────────────────────────────────
-      - name: Compile and Build iOS App (.app)
+      - name: Build iOS App with xcodebuild
         working-directory: Madeira
         run: |
-          PROJECT_FILE=$(find . -maxdepth 3 -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
+          echo "📱 Determining Xcode Target..."
           
-          if [ -z "$PROJECT_FILE" ]; then
-            echo "❌ No Xcode project or workspace found!"
-            exit 1
+          if [ -d "Madeira.xcworkspace" ]; then
+            TARGET="-workspace Madeira.xcworkspace"
+          elif [ -d "app/Madeira.xcworkspace" ]; then
+            TARGET="-workspace app/Madeira.xcworkspace"
+          elif [ -d "Madeira.xcodeproj" ]; then
+            TARGET="-project Madeira.xcodeproj"
+          elif [ -d "app/Madeira.xcodeproj" ]; then
+            TARGET="-project app/Madeira.xcodeproj"
+          else
+            TARGET="-project $(find . -name "*.xcodeproj" | head -n 1)"
           fi
 
-          if [[ "$PROJECT_FILE" == *.xcworkspace ]]; then
-            BUILD_FLAG="-workspace $PROJECT_FILE"
-          else
-            BUILD_FLAG="-project $PROJECT_FILE"
-          fi
-          
-          SCHEME_NAME=$(xcodebuild $BUILD_FLAG -list 2>/dev/null | grep -A 5 "Schemes:" | tail -n +2 | head -n 1 | xargs)
+          echo "Selected Target: $TARGET"
+
+          SCHEME_NAME=$(xcodebuild $TARGET -list 2>/dev/null | grep -A 5 "Schemes:" | tail -n +2 | head -n 1 | xargs)
           if [ -z "$SCHEME_NAME" ]; then
             SCHEME_NAME="Madeira"
           fi
+          echo "Selected Scheme: $SCHEME_NAME"
 
           xcodebuild clean build \
-            $BUILD_FLAG \
+            $TARGET \
             -scheme "$SCHEME_NAME" \
             -sdk iphoneos \
             -configuration Release \
@@ -213,7 +209,7 @@ jobs:
             PROVISIONING_PROFILE="" \
             | xcpretty || \
           xcodebuild clean build \
-            $BUILD_FLAG \
+            $TARGET \
             -scheme "$SCHEME_NAME" \
             -sdk iphoneos \
             -configuration Release \
@@ -226,23 +222,24 @@ jobs:
             PROVISIONING_PROFILE=""
 
       # ────────────────────────────────────────────────
-      # ১২. .app বান্ডল লোকেশন ট্রেস
+      # ১১. Locate Generated .app Bundle
       # ────────────────────────────────────────────────
-      - name: Locate Compiled .app Bundle
+      - name: Locate App Bundle
         id: find_app
         working-directory: Madeira
         run: |
           APP_PATH=$(find build_output -type d -name "*.app" | head -n 1)
           if [ -z "$APP_PATH" ]; then
-            echo "❌ ERROR: Xcode compile failed!"
+            echo "❌ ERROR: Compilation failed, no .app bundle created!"
             exit 1
           fi
+          echo "Found .app at: $APP_PATH"
           echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
 
       # ────────────────────────────────────────────────
-      # ১৩. JIT Entitlement ও OS নির্দেশিকা
+      # ১২. Add Entitlements & MinimumOSVersion
       # ────────────────────────────────────────────────
-      - name: Add JIT Entitlement to Info.plist
+      - name: Configure Plist Entitlements
         working-directory: Madeira
         run: |
           APP_PATH="${{ steps.find_app.outputs.app_path }}"
@@ -257,9 +254,9 @@ jobs:
           fi
 
       # ────────────────────────────────────────────────
-      # ১৪. IPA প্যাকেজিং
+      # ১৩. IPA Packaging
       # ────────────────────────────────────────────────
-      - name: Package into IPA
+      - name: Create IPA Package
         working-directory: Madeira
         run: |
           APP_PATH="${{ steps.find_app.outputs.app_path }}"
@@ -275,9 +272,9 @@ jobs:
           ls -lh Madeira_Unsigned.ipa
 
       # ────────────────────────────────────────────────
-      # ১৫. আর্টিফ্যাক্ট আপলোড
+      # ১৪. Upload Artifact
       # ────────────────────────────────────────────────
-      - name: Upload IPA Artifact
+      - name: Upload Unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: Madeira-Unsigned-IPA
