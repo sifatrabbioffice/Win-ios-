@@ -1,0 +1,272 @@
+name: Build Unsigned Wine-Container IPA (Madeira)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-wine-ipa:
+    name: Build Unsigned Wine IPA (Fully Bundled Engine)
+    runs-on: macos-latest
+
+    steps:
+      # ────────────────────────────────────────────────
+      # ১. সোর্স কোড ক্লোন (সাবমডিউল সহ)
+      # ────────────────────────────────────────────────
+      - name: Checkout Madeira Source
+        uses: actions/checkout@v4
+        with:
+          repository: willfaust/Madeira
+          submodules: recursive
+          fetch-depth: 0
+          path: Madeira
+
+      # ────────────────────────────────────────────────
+      # ২. Xcode লেটেস্ট সেটআপ
+      # ────────────────────────────────────────────────
+      - name: Set up Xcode Latest
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest
+
+      # ────────────────────────────────────────────────
+      # ৩. ক্যাশিং সেটআপ
+      # ────────────────────────────────────────────────
+      - name: Setup ccache Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('Madeira/**/*.cpp', 'Madeira/**/*.h', 'Madeira/**/*.c', 'Madeira/**/*.cc', 'Madeira/**/*.sh', 'Madeira/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Cache Dependencies & Toolchains
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/.cargo
+            ~/Library/Caches/CocoaPods
+            Madeira/toolchains
+          key: ${{ runner.os }}-madeira-deps-${{ hashFiles('Madeira/**/Makefile', 'Madeira/**/CMakeLists.txt', 'Madeira/**/*.cmake', 'Madeira/**/*.sh', 'Madeira/**/*.h', 'Madeira/**/*.cpp', 'Madeira/**/*.cc', 'Madeira/**/Podfile') }}
+          restore-keys: |
+            ${{ runner.os }}-madeira-deps-
+
+      # ────────────────────────────────────────────────
+      # ৪. বিল্ড টুল ইনস্টল
+      # ────────────────────────────────────────────────
+      - name: Install Build Tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          echo "🔧 Installing build dependencies..."
+          brew install cmake ninja lld llvm bison flex \
+            automake autoconf libtool pkg-config wget \
+            python3 pipx ccache p7zip || true
+          sudo gem install cocoapods || true
+
+      # ────────────────────────────────────────────────
+      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল
+      # ────────────────────────────────────────────────
+      - name: Install Python Dependencies
+        run: |
+          pip3 install --upgrade pip --quiet --break-system-packages || true
+          pip3 install pyyaml jinja2 meson --quiet --break-system-packages
+
+      # ────────────────────────────────────────────────
+      # ৬. MINGW Toolchain ইনস্টল ও PATH সেটআপ
+      # ────────────────────────────────────────────────
+      - name: Setup LLVM-MinGW Toolchain
+        working-directory: Madeira
+        run: |
+          echo "🛠️ Downloading and Configuring llvm-mingw..."
+          mkdir -p toolchains
+          
+          if [ ! -d "toolchains/llvm-mingw-ucrt-macos-universal" ]; then
+            wget -q https://github.com/mstorsjo/llvm-mingw/releases/download/20240619/llvm-mingw-20240619-ucrt-macos-universal.tar.xz -O llvm-mingw.tar.xz || \
+            wget -q https://github.com/mstorsjo/llvm-mingw/releases/latest/download/llvm-mingw-ucrt-macos-universal.tar.xz -O llvm-mingw.tar.xz
+            
+            tar -xf llvm-mingw.tar.xz -C toolchains/
+            rm -f llvm-mingw.tar.xz
+            mv toolchains/llvm-mingw-* toolchains/llvm-mingw-ucrt-macos-universal 2>/dev/null || true
+          fi
+          
+          MINGW_BIN="$(pwd)/toolchains/llvm-mingw-ucrt-macos-universal/bin"
+          echo "$MINGW_BIN" >> $GITHUB_PATH
+          echo "LLVM_MINGW=$(pwd)/toolchains/llvm-mingw-ucrt-macos-universal" >> $GITHUB_ENV
+
+      # ────────────────────────────────────────────────
+      # ৭. CocoaPods ডিপেন্ডেন্সি ইনস্টল
+      # ────────────────────────────────────────────────
+      - name: Install CocoaPods Dependencies
+        working-directory: Madeira
+        run: |
+          PODFILE_PATH=$(find . -name "Podfile" | head -n 1)
+          if [ -n "$PODFILE_PATH" ]; then
+            POD_DIR=$(dirname "$PODFILE_PATH")
+            echo "Found Podfile in $POD_DIR"
+            cd "$POD_DIR" && pod install --repo-update
+          else
+            echo "No Podfile found, skipping."
+          fi
+
+      # ────────────────────────────────────────────────
+      # ৮. নেটিভ ডক ও অনুবাদক বাইনারি বিল্ড (Wine, FEX, DXMT, Dock)
+      # ────────────────────────────────────────────────
+      - name: Build Native Translation Components
+        working-directory: Madeira
+        env:
+          CCACHE_DIR: ~/.ccache
+          CCACHE_COMPRESS: "1"
+          MAKEFLAGS: "-j$(sysctl -n hw.ncpu)"
+        run: |
+          echo "🚀 Compiling Native Components..."
+          ccache -s || true
+          
+          for script in build/ffmpeg/build.sh \
+                        build/wine/build.sh \
+                        build/fex/build.sh \
+                        build/dxmt/build.sh \
+                        build/madeira-dock/build.sh; do
+            if [ -f "$script" ]; then
+              echo "▶️ Compiling: $script"
+              chmod +x "$script"
+              bash "$script"
+            fi
+          done
+          
+          ccache -z || true
+
+      # ────────────────────────────────────────────────
+      # ৯. আনসাইনড বিল্ড কনফিগারেশন সেটআপ
+      # ────────────────────────────────────────────────
+      - name: Configure Unsigned Build Settings
+        working-directory: Madeira
+        run: |
+          mkdir -p build_output
+          cat << 'EOF' > Unsigned.xcconfig
+          CODE_SIGNING_ALLOWED = NO
+          CODE_SIGNING_REQUIRED = NO
+          CODE_SIGN_IDENTITY = 
+          DEVELOPMENT_TEAM = 
+          PROVISIONING_PROFILE_SPECIFIER = 
+
+          ENABLE_BITCODE = NO
+          ONLY_ACTIVE_ARCH = NO
+          ARCHS = arm64
+
+          SWIFT_OPTIMIZATION_LEVEL = -O
+          GCC_OPTIMIZATION_LEVEL = s
+          EOF
+
+      # ────────────────────────────────────────────────
+      # ১০. iOS অ্যাপ কস্পাইলেশন ও বিল্ড (xcodebuild)
+      # ────────────────────────────────────────────────
+      - name: Compile and Build iOS App (.app)
+        working-directory: Madeira
+        run: |
+          PROJECT_FILE=$(find . -maxdepth 3 -name "*.xcodeproj" -o -name "*.xcworkspace" | head -n 1)
+          
+          if [ -z "$PROJECT_FILE" ]; then
+            echo "❌ No Xcode project or workspace found!"
+            exit 1
+          fi
+
+          if [[ "$PROJECT_FILE" == *.xcworkspace ]]; then
+            BUILD_FLAG="-workspace $PROJECT_FILE"
+          else
+            BUILD_FLAG="-project $PROJECT_FILE"
+          fi
+          
+          SCHEME_NAME=$(xcodebuild $BUILD_FLAG -list 2>/dev/null | grep -A 5 "Schemes:" | tail -n +2 | head -n 1 | xargs)
+          if [ -z "$SCHEME_NAME" ]; then
+            SCHEME_NAME="Madeira"
+          fi
+
+          xcodebuild clean build \
+            $BUILD_FLAG \
+            -scheme "$SCHEME_NAME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build_output \
+            -xcconfig Unsigned.xcconfig \
+            -parallelizeTargets \
+            -jobs $(sysctl -n hw.ncpu) \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE="" \
+            | xcpretty || \
+          xcodebuild clean build \
+            $BUILD_FLAG \
+            -scheme "$SCHEME_NAME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build_output \
+            -parallelizeTargets \
+            -jobs $(sysctl -n hw.ncpu) \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE=""
+
+      # ────────────────────────────────────────────────
+      # ১১. .app বান্ডল ট্রেস করা
+      # ────────────────────────────────────────────────
+      - name: Locate Compiled .app Bundle
+        id: find_app
+        working-directory: Madeira
+        run: |
+          APP_PATH=$(find build_output -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ ERROR: Xcode compile failed, no .app bundle generated!"
+            exit 1
+          fi
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+
+      # ────────────────────────────────────────────────
+      # ১২. JIT Entitlement, Entitlements & MinimumOSVersion
+      # ────────────────────────────────────────────────
+      - name: Add JIT Entitlement to Info.plist
+        working-directory: Madeira
+        run: |
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          PLIST="$APP_PATH/Info.plist"
+          
+          if [ -f "$PLIST" ]; then
+            /usr/libexec/PlistBuddy -c "Add :get-task-allow bool true" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :get-task-allow true" "$PLIST" 2>/dev/null || true
+            
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 17.4" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 17.4" "$PLIST" 2>/dev/null || true
+          fi
+
+      # ────────────────────────────────────────────────
+      # ১৩. IPA প্যাকেজিং
+      # ────────────────────────────────────────────────
+      - name: Package into IPA
+        working-directory: Madeira
+        run: |
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          
+          rm -rf Payload_Directory
+          mkdir -p Payload_Directory/Payload
+          cp -R "$APP_PATH" Payload_Directory/Payload/
+
+          cd Payload_Directory
+          zip -r9 ../Madeira_Unsigned.ipa Payload
+          cd ..
+
+          ls -lh Madeira_Unsigned.ipa
+
+      # ────────────────────────────────────────────────
+      # ১৪. আর্টিফ্যাক্ট আপলোড
+      # ────────────────────────────────────────────────
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-Unsigned-IPA
+          path: Madeira/Madeira_Unsigned.ipa
+          retention-days: 30
