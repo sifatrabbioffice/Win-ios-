@@ -8,7 +8,7 @@ on:
 jobs:
   build-wine-ipa:
     name: Build Unsigned Wine IPA (Optimized)
-    runs-on: macos-latest          # Apple Silicon M-series runner (macos-14/15)
+    runs-on: macos-latest          # Apple Silicon M-series runner
 
     steps:
       # ────────────────────────────────────────────────
@@ -67,12 +67,12 @@ jobs:
           sudo gem install cocoapods || true
 
       # ────────────────────────────────────────────────
-      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল
+      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল (PEP 668 সমাধানসহ)
       # ────────────────────────────────────────────────
       - name: Install Python Dependencies
         run: |
-          pip3 install --upgrade pip --quiet
-          pip3 install pyyaml jinja2 meson --quiet
+          pip3 install --upgrade pip --quiet --break-system-packages || true
+          pip3 install pyyaml jinja2 meson --quiet --break-system-packages
 
       # ────────────────────────────────────────────────
       # ৬. CocoaPods ডিপেন্ডেন্সি
