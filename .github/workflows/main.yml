@@ -8,8 +8,8 @@ on:
 jobs:
   build-wine-ipa:
     name: Build Unsigned Wine IPA
-    runs-on: macos-14          # M2 চিপের জন্য macOS 14 সবচেয়ে ভালো (Xcode 15.4+)
-    timeout-minutes: 240        # ৪ ঘণ্টা (বিল্ড দীর্ঘ হতে পারে)
+    runs-on: macos-latest          # M2 চিপের জন্য macOS 14 সবচেয়ে ভালো (Xcode 15.4+)
+    #timeout-minutes: 240        # ৪ ঘণ্টা (বিল্ড দীর্ঘ হতে পারে)
 
     steps:
       # ────────────────────────────────────────────────
