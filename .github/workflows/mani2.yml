@@ -67,7 +67,7 @@ jobs:
           sudo gem install cocoapods || true
 
       # ────────────────────────────────────────────────
-      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল (Fixed with --break-system-packages)
+      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল
       # ────────────────────────────────────────────────
       - name: Install Python Dependencies
         run: |
@@ -140,7 +140,7 @@ jobs:
           EOF
 
       # ────────────────────────────────────────────────
-      # ৯. অপ্টিমাইজড iOS অ্যাপ বিল্ড (xcodebuild)
+      # ৯. অপ্টিমাইজড iOS অ্যাপ বিল্ড (Workspace সমর্থিত)
       # ────────────────────────────────────────────────
       - name: Build iOS App
         working-directory: Madeira
@@ -150,8 +150,17 @@ jobs:
           SCHEME_NAME=$(xcodebuild -list 2>/dev/null | grep -A 5 "Schemes:" | tail -n +2 | head -n 1 | xargs) || SCHEME_NAME="Madeira"
           echo "Detected scheme: $SCHEME_NAME"
 
+          # স্বয়ংক্রিয়ভাবে Workspace নাকি Project তা নির্ধারণ
+          if [ -d "*.xcworkspace" ]; then
+            BUILD_TARGET="-workspace $(ls -d *.xcworkspace | head -n 1)"
+            echo "Using Workspace: $BUILD_TARGET"
+          else
+            BUILD_TARGET="-project Madeira.xcodeproj"
+            echo "Using Project: $BUILD_TARGET"
+          fi
+
           xcodebuild clean build \
-            -project Madeira.xcodeproj \
+            $BUILD_TARGET \
             -scheme "$SCHEME_NAME" \
             -sdk iphoneos \
             -configuration Release \
@@ -165,7 +174,7 @@ jobs:
             PROVISIONING_PROFILE="" \
             | xcpretty || \
           xcodebuild clean build \
-            -project Madeira.xcodeproj \
+            $BUILD_TARGET \
             -scheme "$SCHEME_NAME" \
             -sdk iphoneos \
             -configuration Release \
@@ -178,12 +187,15 @@ jobs:
             PROVISIONING_PROFILE=""
 
       # ────────────────────────────────────────────────
-      # ১০. .app বান্ডল লোকেশন
+      # ১০. .app বান্ডল লোকেশন (ডায়াগনস্টিক সহ)
       # ────────────────────────────────────────────────
       - name: Locate .app Bundle
         id: find_app
         working-directory: Madeira
         run: |
+          echo "🔍 Searching for .app bundle in build_output..."
+          find build_output -maxdepth 5
+          
           APP_PATH=$(find build_output -type d -name "*.app" | head -n 1)
           if [ -z "$APP_PATH" ]; then
             echo "❌ ERROR: No .app bundle found!"
