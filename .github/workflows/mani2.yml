@@ -1,0 +1,241 @@
+name: Build Unsigned Wine-Container IPA (Madeira)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build-wine-ipa:
+    name: Build Unsigned Wine IPA (Optimized)
+    runs-on: macos-latest          # Apple Silicon M-series runner
+
+    steps:
+      # ────────────────────────────────────────────────
+      # ১. সোর্স কোড ক্লোন (সাবমডিউল সহ)
+      # ────────────────────────────────────────────────
+      - name: Checkout Madeira Source
+        uses: actions/checkout@v4
+        with:
+          repository: willfaust/Madeira
+          submodules: recursive
+          fetch-depth: 0
+          path: Madeira
+
+      # ────────────────────────────────────────────────
+      # ২. Xcode লেটেস্ট সেটআপ
+      # ────────────────────────────────────────────────
+      - name: Set up Xcode Latest
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest
+
+      # ────────────────────────────────────────────────
+      # ৩. অ্যাডভান্সড ক্যাশিং (ccache + Homebrew + Cargo + CocoaPods)
+      # ────────────────────────────────────────────────
+      - name: Setup ccache Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ hashFiles('Madeira/**/Makefile', 'Madeira/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Cache Dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/.cargo
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-madeira-deps-${{ hashFiles('Madeira/**/Makefile', 'Madeira/**/CMakeLists.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-madeira-deps-
+
+      # ────────────────────────────────────────────────
+      # ৪. বিল্ড টুল ইনস্টল (ফাস্ট মোড)
+      # ────────────────────────────────────────────────
+      - name: Install Build Tools
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          echo "🔧 Installing build dependencies efficiently..."
+          brew install cmake ninja lld llvm bison flex \
+            automake autoconf libtool pkg-config wget \
+            python3 pipx ccache || true
+          sudo gem install cocoapods || true
+
+      # ────────────────────────────────────────────────
+      # ৫. পাইথন ডিপেন্ডেন্সি ইনস্টল (Fixed with --break-system-packages)
+      # ────────────────────────────────────────────────
+      - name: Install Python Dependencies
+        run: |
+          pip3 install --upgrade pip --quiet --break-system-packages || true
+          pip3 install pyyaml jinja2 meson --quiet --break-system-packages
+
+      # ────────────────────────────────────────────────
+      # ৬. CocoaPods ডিপেন্ডেন্সি
+      # ────────────────────────────────────────────────
+      - name: Install CocoaPods Dependencies
+        working-directory: Madeira
+        run: |
+          if [ -f "Podfile" ]; then
+            pod install --repo-update
+          else
+            echo "No Podfile found, skipping."
+          fi
+
+      # ────────────────────────────────────────────────
+      # ৭. নেটিভ কম্পোনেন্ট বিল্ড (ccache এবং Parallel Execution সহ)
+      # ────────────────────────────────────────────────
+      - name: Build Native Components (Accelerated)
+        working-directory: Madeira
+        env:
+          CCACHE_DIR: ~/.ccache
+          CCACHE_COMPRESS: "1"
+          CCACHE_MAXSIZE: "2G"
+          MAKEFLAGS: "-j$(sysctl -n hw.ncpu)"
+        run: |
+          echo "🚀 Building native components with ccache & parallel jobs..."
+          ccache -s || true
+          
+          find build -name "build.sh" -exec chmod +x {} \;
+          
+          for script in build/wine/build.sh \
+                        build/fex/build.sh \
+                        build/dxmt/build.sh \
+                        build/ffmpeg/build.sh \
+                        build/madeira-dock/build.sh; do
+            if [ -f "$script" ]; then
+              echo "▶️ Running: $script"
+              bash "$script" || echo "⚠️ Warning: $script completed with errors"
+            else
+              echo "⏭️ Skipping: $script (not found)"
+            fi
+          done
+          
+          ccache -z || true
+
+      # ────────────────────────────────────────────────
+      # ৮. আনসাইনড Xcode বিল্ড কনফিগারেশন
+      # ────────────────────────────────────────────────
+      - name: Configure Unsigned Build Settings
+        working-directory: Madeira
+        run: |
+          mkdir -p build_output
+          cat << 'EOF' > Unsigned.xcconfig
+          CODE_SIGNING_ALLOWED = NO
+          CODE_SIGNING_REQUIRED = NO
+          CODE_SIGN_IDENTITY = 
+          DEVELOPMENT_TEAM = 
+          PROVISIONING_PROFILE_SPECIFIER = 
+
+          ENABLE_BITCODE = NO
+          ONLY_ACTIVE_ARCH = NO
+          ARCHS = arm64
+
+          SWIFT_OPTIMIZATION_LEVEL = -O
+          GCC_OPTIMIZATION_LEVEL = s
+          EOF
+
+      # ────────────────────────────────────────────────
+      # ৯. অপ্টিমাইজড iOS অ্যাপ বিল্ড (xcodebuild)
+      # ────────────────────────────────────────────────
+      - name: Build iOS App
+        working-directory: Madeira
+        run: |
+          echo "📱 Building iOS app with xcodebuild..."
+          
+          SCHEME_NAME=$(xcodebuild -list 2>/dev/null | grep -A 5 "Schemes:" | tail -n +2 | head -n 1 | xargs) || SCHEME_NAME="Madeira"
+          echo "Detected scheme: $SCHEME_NAME"
+
+          xcodebuild clean build \
+            -project Madeira.xcodeproj \
+            -scheme "$SCHEME_NAME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build_output \
+            -xcconfig Unsigned.xcconfig \
+            -parallelizeTargets \
+            -jobs $(sysctl -n hw.ncpu) \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE="" \
+            | xcpretty || \
+          xcodebuild clean build \
+            -project Madeira.xcodeproj \
+            -scheme "$SCHEME_NAME" \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build_output \
+            -parallelizeTargets \
+            -jobs $(sysctl -n hw.ncpu) \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            PROVISIONING_PROFILE=""
+
+      # ────────────────────────────────────────────────
+      # ১০. .app বান্ডল লোকেশন
+      # ────────────────────────────────────────────────
+      - name: Locate .app Bundle
+        id: find_app
+        working-directory: Madeira
+        run: |
+          APP_PATH=$(find build_output -type d -name "*.app" | head -n 1)
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ ERROR: No .app bundle found!"
+            exit 1
+          fi
+          echo "✅ Found app at: $APP_PATH"
+          echo "app_path=$APP_PATH" >> $GITHUB_OUTPUT
+
+      # ────────────────────────────────────────────────
+      # ১১. JIT Entitlement ও MinimumOSVersion কনফিগারেশন
+      # ────────────────────────────────────────────────
+      - name: Add JIT Entitlement to Info.plist
+        working-directory: Madeira
+        run: |
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          PLIST="$APP_PATH/Info.plist"
+          
+          if [ -f "$PLIST" ]; then
+            echo "📝 Adding get-task-allow to Info.plist..."
+            /usr/libexec/PlistBuddy -c "Add :get-task-allow bool true" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :get-task-allow true" "$PLIST" 2>/dev/null || true
+            
+            /usr/libexec/PlistBuddy -c "Set :MinimumOSVersion 17.4" "$PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :MinimumOSVersion string 17.4" "$PLIST" 2>/dev/null || true
+          fi
+
+      # ────────────────────────────────────────────────
+      # ১২. IPA প্যাকেজিং
+      # ────────────────────────────────────────────────
+      - name: Package into IPA
+        working-directory: Madeira
+        run: |
+          echo "📦 Packaging .app into .ipa..."
+          APP_PATH="${{ steps.find_app.outputs.app_path }}"
+          
+          rm -rf Payload_Directory
+          mkdir -p Payload_Directory/Payload
+          cp -R "$APP_PATH" Payload_Directory/Payload/
+
+          cd Payload_Directory
+          zip -r9 ../Madeira_Unsigned.ipa Payload
+          cd ..
+
+          echo "✅ IPA created successfully:"
+          ls -lh Madeira_Unsigned.ipa
+
+      # ────────────────────────────────────────────────
+      # ১৩. আর্টিফ্যাক্ট আপলোড
+      # ────────────────────────────────────────────────
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Madeira-Unsigned-IPA
+          path: Madeira/Madeira_Unsigned.ipa
+          retention-days: 30
